@@ -18,6 +18,17 @@ find_package(Boost REQUIRED)
 # CUDA PACKAGE
 find_package(CUDA REQUIRED)
 
+if (CUDA_FOUND)
+    message("CUDA found ")
+    message(${CUDA_VERSION_MAJOR})
+    message(${CUDA_VERSION_MINOR})
+    message(${CUDA_INCLUDE_DIRS})
+add_definitions(-DAMCL_USE_GPU)
+else(CUDA_FOUND)
+message(STATUS "CUDA not found. Project will not be built.")
+
+endif(CUDA_FOUND)
+
 SET(CMAKE_C_FLAGS "-O2 -ftree-vectorize ${CMAKE_C_FLAGS}")
 SET(CMAKE_CXX_FLAGS "-O2 -ftree-vectorize ${CMAKE_CXX_FLAGS}")
 
@@ -41,6 +52,8 @@ include_directories(include)
 include_directories(${catkin_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 
 include_directories(${CUDA_INCLUDE_DIRS})
+
+if(CUDA_FOUND)
 set(
   CUDA_NVCC_FLAGS
   ${CUDA_NVCC_FLAGS};
@@ -62,6 +75,29 @@ cuda_add_library(amcl_pf
                     src/amcl/pf/pf_draw.c
 					src/amcl/pf/pf_gpu.cu)
 
+cuda_add_library(amcl_sensors
+                    src/amcl/sensors/amcl_sensor.cpp
+                    src/amcl/sensors/amcl_odom.cpp
+                    src/amcl/sensors/amcl_laser.cpp
+                    src/amcl/sensors/amcl_gpu.cu)
+
+else(CUDA_FOUND)
+
+add_library(amcl_pf
+                    src/amcl/pf/pf.c
+                    src/amcl/pf/pf_kdtree.c
+                    src/amcl/pf/pf_pdf.c
+                    src/amcl/pf/pf_vector.c
+                    src/amcl/pf/eig3.c
+                    src/amcl/pf/pf_draw.c)
+
+
+add_library(amcl_sensors
+                    src/amcl/sensors/amcl_sensor.cpp
+                    src/amcl/sensors/amcl_odom.cpp
+                    src/amcl/sensors/amcl_laser.cpp)
+endif(CUDA_FOUND)
+
 add_library(amcl_map
                     src/amcl/map/map.c
                     src/amcl/map/map_cspace.cpp
@@ -69,11 +105,7 @@ add_library(amcl_map
                     src/amcl/map/map_store.c
                     src/amcl/map/map_draw.c)
 
-cuda_add_library(amcl_sensors
-                    src/amcl/sensors/amcl_sensor.cpp
-                    src/amcl/sensors/amcl_odom.cpp
-                    src/amcl/sensors/amcl_laser.cpp
-                    src/amcl/sensors/amcl_gpu.cu)
+
 target_link_libraries(amcl_sensors amcl_map amcl_pf)
 
 

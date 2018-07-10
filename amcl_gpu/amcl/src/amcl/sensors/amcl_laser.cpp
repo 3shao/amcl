@@ -26,7 +26,7 @@
 // CVS: $Id: amcl_laser.cc 7057 2008-10-02 00:44:06Z gbiggs $
 //
 ///////////////////////////////////////////////////////////////////////////
-#define AMCL_USE_GPU	1
+//#define AMCL_USE_GPU	1
 
 #include <sys/types.h> // required by Darwin
 #include <math.h>

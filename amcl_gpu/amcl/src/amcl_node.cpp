@@ -24,6 +24,8 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <iostream> 
+#include <fstream> 
 
 #include <boost/bind.hpp>
 #include <boost/thread/mutex.hpp>
@@ -48,6 +50,7 @@
 #include "geometry_msgs/Pose.h"
 #include "nav_msgs/GetMap.h"
 #include "nav_msgs/SetMap.h"
+#include "nav_msgs/Odometry.h"
 #include "std_srvs/Empty.h"
 
 // For transform support
@@ -155,6 +158,7 @@ class AmclNode
     void initialPoseReceived(const geometry_msgs::PoseWithCovarianceStampedConstPtr& msg);
     void handleInitialPoseMessage(const geometry_msgs::PoseWithCovarianceStamped& msg);
     void mapReceived(const nav_msgs::OccupancyGridConstPtr& msg);
+    void odometryReceived(const nav_msgs::OdometryConstPtr& msg);
 
     void handleMapMessage(const nav_msgs::OccupancyGrid& msg);
     void freeMapDependentMemory();
@@ -205,6 +209,13 @@ class AmclNode
     int resample_count_;
     double laser_min_range_;
     double laser_max_range_;
+
+    bool initial_success_;
+
+    nav_msgs::Odometry odometry_;
+
+    pf_vector_t global_pose_mean;
+    pf_matrix_t global_pose_cov;
 
     //Nomotion update control
     bool m_force_update;  // used to temporarily let amcl update samples even when no motion occurs...
@@ -445,6 +456,7 @@ AmclNode::AmclNode() :
     requestMap();
   }
   m_force_update = false;
+  initial_success_ = false;
 
   dsrv_ = new dynamic_reconfigure::Server<amcl::AMCLConfig>(ros::NodeHandle("~"));
   dynamic_reconfigure::Server<amcl::AMCLConfig>::CallbackType cb = boost::bind(&AmclNode::reconfigureCB, this, _1, _2);
@@ -714,6 +726,15 @@ void AmclNode::savePoseToServer()
                                   last_published_pose.pose.covariance[6*1+1]);
   private_nh_.setParam("initial_cov_aa", 
                                   last_published_pose.pose.covariance[6*5+5]);
+
+  std::ofstream pose_output;
+  pose_output.open("initialpose");
+  if(pose_output.is_open()) {
+      pose_output << map_pose.getOrigin().x() << std::endl;
+      pose_output << map_pose.getOrigin().y() << std::endl;
+      pose_output << yaw << std::endl;
+      pose_output.close();
+  }
   ROS_INFO("[AMCL]: AmclNode::savePoseToServer OUT");
 }
 
@@ -759,6 +780,18 @@ void AmclNode::updatePoseFromServer()
   else
     ROS_WARN("ignoring NAN in initial covariance AA");	
   ROS_INFO("[AMCL]: AmclNode::updatePoseFromServer OUT");
+
+  std::ifstream input_file;
+  input_file.open("initialpose");
+  if(input_file.is_open()) {
+      input_file >> init_pose_[0];
+      input_file >> init_pose_[1];
+      input_file >> init_pose_[2];
+      input_file.close();
+      init_cov_[0] = 0.5 * 0.5;
+      init_cov_[1] = 0.5 * 0.5;
+      init_cov_[2] = (M_PI/12.0) * (M_PI/12.0);
+  }
 }
 
 void 
@@ -1068,6 +1101,11 @@ AmclNode::setMapCallback(nav_msgs::SetMap::Request& req,
   return true;
 }
 
+void 
+AmclNode::odometryReceived(const nav_msgs::OdometryConstPtr& msg) {
+  odometry_ = *msg;
+}
+
 void
 AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
 {
@@ -1148,10 +1186,53 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
     update = update || m_force_update;
     m_force_update=false;
 
+    if (!initial_success_ ) {
+      update = true;
+    }
+
+    if ((fabs(odometry_.twist.twist.linear.x) < 0.005 && fabs(odometry_.twist.twist.angular.z) < 0.005)) {
+      update = true;
+      static int resample = 0;
+      if( resample > 100&& initial_success_ ) {
+
+        pf_matrix_t pf_init_pose_cov = pf_matrix_zero();
+        pf_init_pose_cov.m[0][0] = 0.05;
+        pf_init_pose_cov.m[1][1] = 0.05;
+        pf_init_pose_cov.m[2][2] = 0.01;
+
+
+        if(initial_pose_hyp_)
+          delete initial_pose_hyp_;
+        initial_pose_hyp_ = new amcl_hyp_t();
+        initial_pose_hyp_->pf_pose_mean = global_pose_mean;
+        initial_pose_hyp_->pf_pose_cov = pf_init_pose_cov;
+        applyInitialPose();
+        resample=0;
+      }
+      resample++;
+    }
+
+
+    if( (global_pose_cov.m[0][0] < 0.02 &&global_pose_cov.m[1][1] < 0.02 &&global_pose_cov.m[2][2] < 0.01)) {
+      update = true;
+      pf_matrix_t pf_init_pose_cov = pf_matrix_zero();
+      pf_init_pose_cov.m[0][0] = 0.05;
+      pf_init_pose_cov.m[1][1] = 0.05;
+      pf_init_pose_cov.m[2][2] = 0.01;
+
+      if(initial_pose_hyp_)
+        delete initial_pose_hyp_;
+      initial_pose_hyp_ = new amcl_hyp_t();
+      initial_pose_hyp_->pf_pose_mean = global_pose_mean;
+      initial_pose_hyp_->pf_pose_cov = pf_init_pose_cov;
+      applyInitialPose();
+    }
+
     // Set the laser update flags
-    if(update)
+    if(update) {
       for(unsigned int i=0; i < lasers_update_.size(); i++)
         lasers_update_[i] = true;
+    }
   }
 
   bool force_publication = false;
@@ -1338,6 +1419,7 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
          puts("");
        */
 
+      global_pose_mean = hyps[max_weight_hyp].pf_pose_mean;
       geometry_msgs::PoseWithCovarianceStamped p;
       // Fill in the header
       p.header.frame_id = global_frame_id_;
@@ -1363,6 +1445,12 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       // covariance for the highest-weight cluster
       //p.covariance[6*5+5] = hyps[max_weight_hyp].pf_pose_cov.m[2][2];
       p.pose.covariance[6*5+5] = set->cov.m[2][2];
+
+      global_pose_cov = set->cov;
+
+      if(!initial_success_&& (global_pose_cov.m[0][0] < 0.01 &&global_pose_cov.m[1][1] < 0.01 &&global_pose_cov.m[2][2] < 0.1)){
+          initial_success_ = true;
+      }
 
       /*
          printf("cov:\n");
@@ -1539,6 +1627,10 @@ AmclNode::handleInitialPoseMessage(const geometry_msgs::PoseWithCovarianceStampe
   }
   pf_init_pose_cov.m[2][2] = msg.pose.covariance[6*5+5];
 
+  pf_init_pose_cov.m[0][0] = 0.5*0.5;
+  pf_init_pose_cov.m[1][1] = 0.5*0.5;
+  pf_init_pose_cov.m[2][2] = M_PI*M_PI/4.0;
+
   delete initial_pose_hyp_;
   initial_pose_hyp_ = new amcl_hyp_t();
   initial_pose_hyp_->pf_pose_mean = pf_init_pose_mean;
@@ -1556,6 +1648,7 @@ void
 AmclNode::applyInitialPose()
 {
   ROS_INFO("[AMCL]: AmclNode::applyInitialPose IN");
+  initial_success_ = false;
   boost::recursive_mutex::scoped_lock cfl(configuration_mutex_);
   if( initial_pose_hyp_ != NULL && map_ != NULL ) {
     pf_init(pf_, initial_pose_hyp_->pf_pose_mean, initial_pose_hyp_->pf_pose_cov);
